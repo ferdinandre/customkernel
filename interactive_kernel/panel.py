@@ -17,8 +17,6 @@ If anywidget isn't installed, Panel() raises a clear install hint.
 
 from __future__ import annotations
 
-import threading
-import time
 from typing import Any, Dict, List, Optional
 
 from .engine import default_engine
@@ -116,18 +114,40 @@ function render({ model, el }) {
 
   const curveWrap = document.createElement("div");
   curveWrap.style.cssText =
-    "position:relative; height:160px; border:1px solid rgba(128,128,128,.2);" +
-    "border-radius:8px; padding:8px; margin-bottom:12px;";
+    "position:relative; height:190px; border:1px solid rgba(128,128,128,.2);" +
+    "border-radius:8px; margin-bottom:12px;";
+  const plot = document.createElement("div");
+  plot.style.cssText =
+    "position:absolute; top:10px; right:12px; bottom:28px; left:52px;";
   const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
   svg.setAttribute("width", "100%");
   svg.setAttribute("height", "100%");
   svg.setAttribute("viewBox", "0 0 600 140");
   svg.setAttribute("preserveAspectRatio", "none");
-  curveWrap.appendChild(svg);
+  svg.style.cssText = "position:absolute; inset:0;";
   const markerLayer = document.createElement("div");
-  markerLayer.style.cssText =
-    "position:absolute; inset:8px; pointer-events:none;";
-  curveWrap.appendChild(markerLayer);
+  markerLayer.style.cssText = "position:absolute; inset:0; pointer-events:none;";
+  plot.append(svg, markerLayer);
+  curveWrap.appendChild(plot);
+
+  const tickStyle =
+    "position:absolute; font-size:11px; opacity:.6; font-family:monospace;";
+  const yMaxEl = document.createElement("div");
+  yMaxEl.style.cssText = tickStyle + "left:4px; top:6px; width:44px; text-align:right;";
+  const yMinEl = document.createElement("div");
+  yMinEl.style.cssText = tickStyle + "left:4px; bottom:24px; width:44px; text-align:right;";
+  const xMinEl = document.createElement("div");
+  xMinEl.style.cssText = tickStyle + "left:52px; bottom:8px;";
+  const xMaxEl = document.createElement("div");
+  xMaxEl.style.cssText = tickStyle + "right:12px; bottom:8px;";
+  const yLabelEl = document.createElement("div");
+  yLabelEl.style.cssText = tickStyle +
+    "left:2px; top:50%; transform:rotate(-90deg) translateX(0);" +
+    "transform-origin:left center; opacity:.8;";
+  const xLabelEl = document.createElement("div");
+  xLabelEl.style.cssText = tickStyle +
+    "left:0; right:0; bottom:8px; text-align:center; opacity:.8;";
+  curveWrap.append(yMaxEl, yMinEl, xMinEl, xMaxEl, yLabelEl, xLabelEl);
   root.appendChild(curveWrap);
 
   const slidersWrap = document.createElement("div");
@@ -186,18 +206,41 @@ function render({ model, el }) {
     const series = model.get("_series") || [];
     while (svg.firstChild) svg.removeChild(svg.firstChild);
     markerLayer.innerHTML = "";
-    if (series.length < 2) return;
+    yLabelEl.textContent = model.get("_ylabel") || "";
+    xLabelEl.textContent = model.get("_xlabel") || "";
+    if (series.length < 2) {
+      yMaxEl.textContent = yMinEl.textContent = "";
+      xMinEl.textContent = xMaxEl.textContent = "";
+      return;
+    }
     const xs = series.map(p => p[0]), ys = series.map(p => p[1]);
     const x0 = Math.min(...xs), x1 = Math.max(...xs);
     const y0 = Math.min(...ys), y1 = Math.max(...ys);
     const sx = v => (x1 === x0 ? 0 : (v - x0) / (x1 - x0)) * 600;
     const sy = v => 140 - (y1 === y0 ? 0.5 : (v - y0) / (y1 - y0)) * 130 - 5;
+
+    [0.5].concat([0, 1]).forEach(f => {
+      const gy = 140 - f * 130 - 5;
+      const g = document.createElementNS(svg.namespaceURI, "line");
+      g.setAttribute("x1", 0); g.setAttribute("x2", 600);
+      g.setAttribute("y1", gy); g.setAttribute("y2", gy);
+      g.setAttribute("stroke", "rgba(128,128,128,.18)");
+      g.setAttribute("stroke-width", "1");
+      svg.appendChild(g);
+    });
+
     const path = document.createElementNS(svg.namespaceURI, "polyline");
     path.setAttribute("fill", "none");
     path.setAttribute("stroke", "#378ADD");
     path.setAttribute("stroke-width", "2");
+    path.setAttribute("vector-effect", "non-scaling-stroke");
     path.setAttribute("points", series.map(p => sx(p[0]) + "," + sy(p[1])).join(" "));
     svg.appendChild(path);
+
+    yMaxEl.textContent = fmt(y1);
+    yMinEl.textContent = fmt(y0);
+    xMinEl.textContent = fmt(x0);
+    xMaxEl.textContent = fmt(x1);
 
     (model.get("_markers") || []).forEach(m => {
       if (m.x < x0 || m.x > x1) return;
@@ -278,10 +321,20 @@ function render({ model, el }) {
   model.on("change:_live", drawBanner);
   model.on("change:_series", drawCurve);
   model.on("change:_markers", drawCurve);
+  model.on("change:_xlabel", drawCurve);
+  model.on("change:_ylabel", drawCurve);
   model.on("change:_metrics_latest", drawCards);
   model.on("change:_controls_version", buildSliders);
 
   drawBanner(); drawCurve(); drawCards();
+
+  // Heartbeat: pull fresh state from the kernel. Because Python answers this
+  // while handling an incoming message on the main loop, the reply flushes
+  // reliably even in Colab (unlike a kernel-side background-thread push).
+  const ms = model.get("_poll_ms") || 400;
+  model.send({ type: "poll" });
+  const hb = setInterval(() => model.send({ type: "poll" }), ms);
+  return () => clearInterval(hb);
 }
 export default { render };
 """
@@ -298,11 +351,16 @@ class Panel(_Base):
         _state = traitlets.Unicode("idle").tag(sync=True)
         _step = traitlets.Int(0, allow_none=True).tag(sync=True)
         _live = traitlets.Bool(True).tag(sync=True)
+        _xlabel = traitlets.Unicode("step").tag(sync=True)
+        _ylabel = traitlets.Unicode("reward").tag(sync=True)
+        _poll_ms = traitlets.Int(400).tag(sync=True)
 
     def __init__(self, tunables: Optional[Tunables] = None,
                  metrics: Optional[MetricLog] = None,
                  primary: Optional[str] = None,
-                 hz: float = 3.0, live: bool = True, engine=None, **kw):
+                 hz: float = 3.0, live: bool = True,
+                 xlabel: str = "step", ylabel: Optional[str] = None,
+                 window: int = 0, engine=None, **kw):
         if not _HAS_ANYWIDGET:
             raise ImportError(
                 "the live panel needs anywidget: pip install anywidget "
@@ -310,27 +368,36 @@ class Panel(_Base):
                 "`pip install -U interactive-kernel`)")
         super().__init__(**kw)
         self._live = bool(live)
+        self._xlabel = xlabel
+        self._user_ylabel = ylabel
+        self._window = int(window)
         self._t = tunables or Tunables()
         self._m = metrics or MetricLog()
         self._engine = engine or default_engine
         self._primary = primary
-        self._period = 1.0 / max(hz, 0.5)
+        self._poll_ms = int(1000 / max(hz, 0.5))
         self._last_version = -1
-        self._stop_pusher = False
         self.on_msg(self._on_msg)
         self._push(initial=True)
-        self._pusher = threading.Thread(target=self._loop, daemon=True,
-                                        name="ik-panel-pusher")
-        self._pusher.start()
 
     # -- JS -> Python ---------------------------------------------------- #
 
+    _DYNAMIC = ["_series", "_markers", "_metrics_latest", "_state", "_step"]
+
     def _on_msg(self, _widget, content, _buffers):
         t = content.get("type")
-        if t == "set":
+        if t == "poll":
+            # Pull fresh state and force a resend on the main loop -> flushes
+            # reliably (this is what makes the panel live on Colab).
+            self._push()
+            try:
+                self.send_state(self._DYNAMIC)
+            except Exception:                       # noqa: BLE001
+                pass
+        elif t == "set":
             self._t._set(content["name"], content["value"], external=False)
         elif t == "pause":
-            self._engine.pause(timeout=0)        # non-blocking arm
+            self._engine.pause(timeout=0)            # non-blocking arm
         elif t == "resume":
             self._engine.resume()
         elif t == "stop":
@@ -368,26 +435,13 @@ class Panel(_Base):
             self._last_version = v
         key = self._primary_key()
         if key:
+            tail = self._window or None
             self._series = [[float(x), float(y)]
-                            for (x, y) in self._m.series(key)
+                            for (x, y) in self._m.series(key, tail=tail)
                             if y is not None]
             self._markers = self._compute_markers()
+            self._ylabel = self._user_ylabel or key
         self._metrics_latest = {k: float(v) for k, v
                                 in self._m.latest().items()}
         self._step = self._m.last_step or 0
         self._state = self._engine.live_state()
-
-    def _loop(self) -> None:
-        while not self._stop_pusher:
-            try:
-                self._push()
-            except Exception:                       # noqa: BLE001
-                pass
-            time.sleep(self._period)
-
-    def close(self):                                # stop the pusher cleanly
-        self._stop_pusher = True
-        try:
-            super().close()
-        except Exception:                           # noqa: BLE001
-            pass

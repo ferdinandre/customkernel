@@ -169,14 +169,17 @@ class MetricLog:
         with self._lock:
             return self._rows[-1][1] if self._rows else None
 
-    def series(self, key: str, max_points: int = 300
+    def series(self, key: str, max_points: int = 300, tail: Optional[int] = None
                ) -> List[Tuple[float, float]]:
-        """Downsampled [(x, value)] for `key`; x is step if present else idx."""
+        """Downsampled [(x, value)] for `key`; x is step if present else idx.
+        If `tail` is set, only the last `tail` matching points are considered
+        (a recent window) before downsampling."""
         with self._lock:
-            pts = [(i if s is None else s, t, row.get(key))
+            pts = [(i if s is None else s, row.get(key))
                    for i, (t, s, row) in enumerate(self._rows)
                    if key in row]
-        pts = [(x, v) for (x, t, v) in [(x, t, v) for (x, t, v) in pts]]
+        if tail:
+            pts = pts[-tail:]
         if len(pts) <= max_points:
             return pts
         stride = len(pts) / max_points
