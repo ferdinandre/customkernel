@@ -114,11 +114,11 @@ function render({ model, el }) {
 
   const curveWrap = document.createElement("div");
   curveWrap.style.cssText =
-    "position:relative; height:190px; border:1px solid rgba(128,128,128,.2);" +
-    "border-radius:8px; margin-bottom:12px;";
+    "position:relative; height:210px; border:1px solid rgba(128,128,128,.2);" +
+    "border-radius:8px; margin-bottom:12px; overflow:hidden;";
   const plot = document.createElement("div");
   plot.style.cssText =
-    "position:absolute; top:10px; right:12px; bottom:28px; left:52px;";
+    "position:absolute; top:10px; right:14px; bottom:42px; left:56px;";
   const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
   svg.setAttribute("width", "100%");
   svg.setAttribute("height", "100%");
@@ -127,26 +127,34 @@ function render({ model, el }) {
   svg.style.cssText = "position:absolute; inset:0;";
   const markerLayer = document.createElement("div");
   markerLayer.style.cssText = "position:absolute; inset:0; pointer-events:none;";
-  plot.append(svg, markerLayer);
+  const waitEl = document.createElement("div");
+  waitEl.style.cssText =
+    "position:absolute; inset:0; display:flex; align-items:center;" +
+    "justify-content:center; font-size:13px; opacity:.5;";
+  waitEl.textContent = "waiting for data\u2026";
+  plot.append(svg, markerLayer, waitEl);
   curveWrap.appendChild(plot);
 
   const tickStyle =
-    "position:absolute; font-size:11px; opacity:.6; font-family:monospace;";
+    "position:absolute; font-size:11px; opacity:.55; font-family:monospace;" +
+    "color:inherit;";
+  const labStyle =
+    "position:absolute; font-size:12px; opacity:.85; color:inherit;";
   const yMaxEl = document.createElement("div");
-  yMaxEl.style.cssText = tickStyle + "left:4px; top:6px; width:44px; text-align:right;";
+  yMaxEl.style.cssText = tickStyle + "left:2px; top:6px; width:50px; text-align:right;";
   const yMinEl = document.createElement("div");
-  yMinEl.style.cssText = tickStyle + "left:4px; bottom:24px; width:44px; text-align:right;";
+  yMinEl.style.cssText = tickStyle + "left:2px; bottom:40px; width:50px; text-align:right;";
   const xMinEl = document.createElement("div");
-  xMinEl.style.cssText = tickStyle + "left:52px; bottom:8px;";
+  xMinEl.style.cssText = tickStyle + "left:56px; bottom:22px;";
   const xMaxEl = document.createElement("div");
-  xMaxEl.style.cssText = tickStyle + "right:12px; bottom:8px;";
+  xMaxEl.style.cssText = tickStyle + "right:14px; bottom:22px;";
   const yLabelEl = document.createElement("div");
-  yLabelEl.style.cssText = tickStyle +
-    "left:2px; top:50%; transform:rotate(-90deg) translateX(0);" +
-    "transform-origin:left center; opacity:.8;";
+  yLabelEl.style.cssText = labStyle +
+    "left:-18px; top:50%; transform:rotate(-90deg);" +
+    "transform-origin:center; white-space:nowrap;";
   const xLabelEl = document.createElement("div");
-  xLabelEl.style.cssText = tickStyle +
-    "left:0; right:0; bottom:8px; text-align:center; opacity:.8;";
+  xLabelEl.style.cssText = labStyle +
+    "left:56px; right:14px; bottom:4px; text-align:center;";
   curveWrap.append(yMaxEl, yMinEl, xMinEl, xMaxEl, yLabelEl, xLabelEl);
   root.appendChild(curveWrap);
 
@@ -209,21 +217,27 @@ function render({ model, el }) {
     yLabelEl.textContent = model.get("_ylabel") || "";
     xLabelEl.textContent = model.get("_xlabel") || "";
     if (series.length < 2) {
+      waitEl.style.display = "flex";
       yMaxEl.textContent = yMinEl.textContent = "";
       xMinEl.textContent = xMaxEl.textContent = "";
       return;
     }
+    waitEl.style.display = "none";
     const xs = series.map(p => p[0]), ys = series.map(p => p[1]);
     const x0 = Math.min(...xs), x1 = Math.max(...xs);
-    const y0 = Math.min(...ys), y1 = Math.max(...ys);
+    let y0 = Math.min(...ys), y1 = Math.max(...ys);
+    let pad = (y1 - y0) * 0.08;
+    if (pad === 0) pad = Math.abs(y1) * 0.08 || 1;   // flat line: still pad
+    const y0p = y0 - pad, y1p = y1 + pad;
     const sx = v => (x1 === x0 ? 0 : (v - x0) / (x1 - x0)) * 600;
-    const sy = v => 140 - (y1 === y0 ? 0.5 : (v - y0) / (y1 - y0)) * 130 - 5;
+    const sy = v => 140 - (y1p === y0p ? 0.5 : (v - y0p) / (y1p - y0p)) * 140;
 
-    [0.5].concat([0, 1]).forEach(f => {
-      const gy = 140 - f * 130 - 5;
+    [0, 0.5, 1].forEach(f => {
+      const gy = 140 - f * 140;
       const g = document.createElementNS(svg.namespaceURI, "line");
       g.setAttribute("x1", 0); g.setAttribute("x2", 600);
-      g.setAttribute("y1", gy); g.setAttribute("y2", gy);
+      g.setAttribute("y1", gy === 0 ? 1 : (gy === 140 ? 139 : gy));
+      g.setAttribute("y2", gy === 0 ? 1 : (gy === 140 ? 139 : gy));
       g.setAttribute("stroke", "rgba(128,128,128,.18)");
       g.setAttribute("stroke-width", "1");
       svg.appendChild(g);
@@ -375,10 +389,56 @@ class Panel(_Base):
         self._m = metrics or MetricLog()
         self._engine = engine or default_engine
         self._primary = primary
+        self._period = 1.0 / max(hz, 0.5)
         self._poll_ms = int(1000 / max(hz, 0.5))
         self._last_version = -1
+        self._closed = False
         self.on_msg(self._on_msg)
         self._push(initial=True)
+        self._start_autopush()
+
+    # -- live updates: drive pushes from the kernel's event loop ---------- #
+    # A timer on the kernel io_loop wakes the loop periodically (flushing the
+    # comm socket) and runs the push on the loop's own thread, so updates are
+    # delivered continuously without an active cell and without blocking the
+    # slider messages coming the other way. This is what makes it live on
+    # Colab, where background-thread comm sends don't flush.
+
+    def _start_autopush(self) -> None:
+        try:
+            from IPython import get_ipython
+            loop = get_ipython().kernel.io_loop
+        except Exception:                            # noqa: BLE001
+            self._loop = None
+            return                                   # fall back to JS poll
+        self._loop = loop
+
+        def tick():
+            if self._closed:
+                return
+            try:
+                self._push()
+            except Exception:                        # noqa: BLE001
+                pass
+            try:
+                loop.call_later(self._period, tick)
+            except Exception:                        # noqa: BLE001
+                pass
+
+        try:
+            if hasattr(loop, "add_callback"):        # tornado IOLoop
+                loop.add_callback(tick)
+            else:                                    # asyncio loop
+                loop.call_soon_threadsafe(tick)
+        except Exception:                            # noqa: BLE001
+            pass
+
+    def close(self):
+        self._closed = True
+        try:
+            super().close()
+        except Exception:                            # noqa: BLE001
+            pass
 
     # -- JS -> Python ---------------------------------------------------- #
 
