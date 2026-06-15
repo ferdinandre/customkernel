@@ -178,9 +178,21 @@ class PauseEngine:
     def set_local(self, name: str, value: Any, depth: int = 0) -> None:
         write_frame_local(self.frame_at(depth), name, value)
 
+    def live_state(self) -> str:
+        """Reliable state derived from actual thread/event state, not the
+        mutable self.state field (which only tracks the pause transition)."""
+        with self._lock:
+            if self._paused_thread is not None:
+                return "paused"
+            if not self._resume_evt.is_set():
+                return "armed"          # pause requested, not yet parked
+            if self._threads:
+                return "running"
+            return "idle"
+
     def status(self) -> Dict[str, Any]:
         with self._lock:
-            return {"state": self.state,
+            return {"state": self.live_state(),
                     "registered_threads": len(self._threads),
                     "paused_thread": self._paused_thread}
 

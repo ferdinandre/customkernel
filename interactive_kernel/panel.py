@@ -63,12 +63,31 @@ function valueToSlider(c) {
 
 function render({ model, el }) {
   el.innerHTML = "";
+  const uid = "ikp-" + Math.random().toString(36).slice(2, 8);
   const root = document.createElement("div");
+  root.id = uid;
   root.style.cssText =
     "font-family: var(--jp-ui-font-family, system-ui, sans-serif);" +
     "border:1px solid rgba(128,128,128,.3); border-radius:12px;" +
     "padding:14px; max-width:680px;";
   el.appendChild(root);
+
+  const style = document.createElement("style");
+  style.textContent =
+    "#" + uid + " .ikbtn{margin-left:6px;font-size:13px;padding:4px 12px;" +
+    "border:1px solid rgba(128,128,128,.4);border-radius:6px;" +
+    "background:transparent;color:inherit;cursor:pointer;" +
+    "transition:background .1s,transform .05s,opacity .1s;}" +
+    "#" + uid + " .ikbtn:hover:not(:disabled){background:rgba(128,128,128,.15);}" +
+    "#" + uid + " .ikbtn:active:not(:disabled){transform:scale(.95);" +
+    "background:rgba(128,128,128,.28);}" +
+    "#" + uid + " .ikbtn:disabled{opacity:.35;cursor:default;}" +
+    "#" + uid + " .ikbtn.primary{border-color:#378ADD;color:#378ADD;" +
+    "background:rgba(55,138,221,.12);font-weight:500;}" +
+    "#" + uid + " .ikbtn.danger:hover:not(:disabled){" +
+    "background:rgba(226,75,74,.18);border-color:#E24B4A;color:#E24B4A;}" +
+    "#" + uid + " input[type=range]:disabled{opacity:.4;cursor:default;}";
+  root.appendChild(style);
 
   const banner = document.createElement("div");
   banner.style.cssText =
@@ -76,18 +95,22 @@ function render({ model, el }) {
     "padding:8px 12px; border-radius:8px; margin-bottom:12px; font-size:14px;";
   const bannerText = document.createElement("span");
   const btns = document.createElement("div");
-  const mkBtn = (label, type) => {
+  const buttons = {};
+  const mkBtn = (label, type, extra) => {
     const b = document.createElement("button");
     b.textContent = label;
-    b.style.cssText =
-      "margin-left:6px; font-size:13px; padding:4px 12px; cursor:pointer;" +
-      "border:1px solid rgba(128,128,128,.4); border-radius:6px;" +
-      "background:transparent; color:inherit;";
-    b.onclick = () => model.send({ type });
+    b.className = "ikbtn" + (extra ? " " + extra : "");
+    b.dataset.label = label;
+    b.onclick = () => {
+      if (b.disabled) return;
+      model.send({ type });
+      optimistic(type);          // immediate feedback before the next push
+    };
+    buttons[type] = b;
     return b;
   };
   btns.append(mkBtn("pause", "pause"), mkBtn("resume", "resume"),
-              mkBtn("stop", "stop"));
+              mkBtn("stop", "stop", "danger"));
   banner.append(bannerText, btns);
   root.appendChild(banner);
 
@@ -119,22 +142,44 @@ function render({ model, el }) {
     "gap:8px;";
   root.appendChild(cardsWrap);
 
-  function drawBanner() {
-    const st = model.get("_state");
-    const step = model.get("_step");
+  let optimisticState = null;
+  function optimistic(type) {
+    if (type === "pause") optimisticState = "armed";
+    else if (type === "resume") optimisticState = "running";
+    else if (type === "stop") optimisticState = "idle";
+    applyState(optimisticState);
+  }
+
+  function applyState(st) {
+    const live = model.get("_live");
     const palette = {
-      running: ["rgba(29,158,117,.15)", "#1D9E75"],
-      paused: ["rgba(239,159,39,.18)", "#BA7517"],
-      armed: ["rgba(239,159,39,.12)", "#BA7517"],
-      idle: ["rgba(128,128,128,.12)", "inherit"],
-      stopped: ["rgba(128,128,128,.15)", "inherit"],
-    }[st] || ["rgba(128,128,128,.12)", "inherit"];
+      running: ["rgba(29,158,117,.15)", "#1D9E75", "running"],
+      paused: ["rgba(239,159,39,.18)", "#BA7517", "paused"],
+      armed: ["rgba(239,159,39,.12)", "#BA7517", "pausing\u2026"],
+      idle: ["rgba(128,128,128,.12)", "inherit", "idle"],
+      stopped: ["rgba(128,128,128,.15)", "inherit", "stopped"],
+    }[st] || ["rgba(128,128,128,.12)", "inherit", st];
     banner.style.background = palette[0];
     bannerText.style.color = palette[1];
-    const label = st === "paused" ? "paused" :
-      st === "armed" ? "pause armed" : st;
-    bannerText.textContent =
-      label + (step != null ? "  ·  step " + step : "");
+    const step = model.get("_step");
+    const editNote = live ? "  \u00b7  sliders live" :
+      (st === "paused" ? "  \u00b7  editable (paused)" : "  \u00b7  pause to edit");
+    bannerText.textContent = palette[2] +
+      (step != null ? "  \u00b7  step " + step : "") + editNote;
+
+    const active = (st === "running" || st === "paused" || st === "armed");
+    buttons.pause.disabled = !(st === "running");
+    buttons.resume.disabled = !(st === "paused" || st === "armed");
+    buttons.stop.disabled = !active;
+    buttons.pause.classList.toggle("primary", st === "running");
+    buttons.resume.classList.toggle("primary",
+      st === "paused" || st === "armed");
+  }
+
+  function drawBanner() {
+    optimisticState = null;        // real state wins over optimistic guess
+    applyState(model.get("_state"));
+    buildSliders();                // re-evaluate slider enabled state
   }
 
   function drawCurve() {
@@ -174,11 +219,14 @@ function render({ model, el }) {
 
   function buildSliders() {
     slidersWrap.innerHTML = "";
+    const live = model.get("_live");
+    const st = optimisticState || model.get("_state");
+    const editable = live || st === "paused";
     (model.get("_controls") || []).forEach(c => {
       const card = document.createElement("div");
       card.style.cssText =
         "border:1px solid rgba(128,128,128,.25); border-radius:8px;" +
-        "padding:10px 12px;";
+        "padding:10px 12px;" + (editable ? "" : "opacity:.55;");
       const head = document.createElement("div");
       head.style.cssText =
         "display:flex; justify-content:space-between; align-items:baseline;" +
@@ -196,6 +244,7 @@ function render({ model, el }) {
       input.min = 0; input.max = 1000; input.step = 1;
       input.value = Math.round(valueToSlider(c) * 1000);
       input.style.width = "100%";
+      input.disabled = !editable;
       input.oninput = () => {
         const v = sliderToValue(c, input.value / 1000);
         c.value = v;
@@ -225,13 +274,14 @@ function render({ model, el }) {
   }
 
   model.on("change:_state", drawBanner);
-  model.on("change:_step", drawBanner);
+  model.on("change:_step", () => applyState(optimisticState || model.get("_state")));
+  model.on("change:_live", drawBanner);
   model.on("change:_series", drawCurve);
   model.on("change:_markers", drawCurve);
   model.on("change:_metrics_latest", drawCards);
   model.on("change:_controls_version", buildSliders);
 
-  drawBanner(); drawCurve(); buildSliders(); drawCards();
+  drawBanner(); drawCurve(); drawCards();
 }
 export default { render };
 """
@@ -247,17 +297,19 @@ class Panel(_Base):
         _metrics_latest = traitlets.Dict().tag(sync=True)
         _state = traitlets.Unicode("idle").tag(sync=True)
         _step = traitlets.Int(0, allow_none=True).tag(sync=True)
+        _live = traitlets.Bool(True).tag(sync=True)
 
     def __init__(self, tunables: Optional[Tunables] = None,
                  metrics: Optional[MetricLog] = None,
                  primary: Optional[str] = None,
-                 hz: float = 3.0, engine=None, **kw):
+                 hz: float = 3.0, live: bool = True, engine=None, **kw):
         if not _HAS_ANYWIDGET:
             raise ImportError(
                 "the live panel needs anywidget: pip install anywidget "
                 "(already a dependency of interactive-kernel; run "
                 "`pip install -U interactive-kernel`)")
         super().__init__(**kw)
+        self._live = bool(live)
         self._t = tunables or Tunables()
         self._m = metrics or MetricLog()
         self._engine = engine or default_engine
@@ -323,7 +375,7 @@ class Panel(_Base):
         self._metrics_latest = {k: float(v) for k, v
                                 in self._m.latest().items()}
         self._step = self._m.last_step or 0
-        self._state = self._engine.state
+        self._state = self._engine.live_state()
 
     def _loop(self) -> None:
         while not self._stop_pusher:
