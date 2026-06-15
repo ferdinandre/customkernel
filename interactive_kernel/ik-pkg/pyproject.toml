@@ -1,0 +1,16 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "interactive-kernel"
+version = "0.1.0"
+description = "Jupyter kernel with pausable execution: pause, edit live variables, resume"
+requires-python = ">=3.9"
+dependencies = []
+
+[project.optional-dependencies]
+kernel = ["ipykernel>=6.29", "jupyter_client>=8"]
+
+[tool.setuptools.packages.find]
+include = ["interactive_kernel*"]
