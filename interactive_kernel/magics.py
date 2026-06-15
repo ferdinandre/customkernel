@@ -40,15 +40,30 @@ class Controls:
     def __init__(self, engine):
         self._e = engine
 
-    def pause(self, timeout: float = 5.0) -> bool:
-        ok = self._e.pause(timeout=timeout)
+    def pause(self, wait: bool = False, timeout: float = 30.0) -> bool:
+        """Arm a pause. Non-blocking by default: returns immediately and the
+        loop parks at its next line event or checkpoint(). Pass wait=True to
+        block until it actually parks (up to timeout)."""
+        self._e.pause(timeout=0)                     # arm, return at once
+        if not wait:
+            print("pause armed -- will park at next checkpoint/line "
+                  "(check %pstatus, then %plocals)")
+            return False
+        ok = self._e.wait_paused(timeout)
         if ok:
             top = self._e.stack()[0]
             print(f"paused in {top['function']}() at "
                   f"{top['file']}:{top['line']}")
         else:
-            print("nothing reached a pause point (is a %%bg cell running?)")
+            print(f"still running after {timeout}s -- pause stays armed")
         return ok
+
+    def panel(self, tunables=None, metrics=None, **kw):
+        """Build the live anywidget panel. Pass your Tunables / MetricLog,
+        or omit to bind to whatever exists in the user namespace."""
+        from .panel import Panel
+        return Panel(tunables=tunables, metrics=metrics,
+                     engine=self._e, **kw)
 
     def resume(self) -> None:
         self._e.resume()
@@ -105,8 +120,12 @@ def _register_magics(ipython, engine) -> None:
 
         @line_magic
         def pause(self, line):
-            timeout = float(line) if line.strip() else 5.0
-            ipython.user_ns["ictl"].pause(timeout=timeout)
+            ipython.user_ns["ictl"].pause(wait=False)
+
+        @line_magic
+        def pwait(self, line):
+            timeout = float(line) if line.strip() else 30.0
+            ipython.user_ns["ictl"].pause(wait=True, timeout=timeout)
 
         @line_magic
         def resume(self, line):

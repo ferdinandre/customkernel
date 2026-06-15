@@ -122,16 +122,20 @@ class PauseEngine:
             self._resume_evt.clear()
             self.state = "armed"
             self._arm()
-        if timeout is None:
-            return True
+        if timeout is None or timeout == 0:
+            # Non-blocking: stay armed; the worker parks at its next line
+            # event or checkpoint(). Poll status() / _paused_evt to confirm.
+            return self._paused_evt.is_set()
         ok = self._paused_evt.wait(timeout)
         if not ok:
             with self._lock:
-                if self.state == "armed":   # nothing hit a pause point
-                    self.state = "idle"
-                    self._resume_evt.set()
-                    self._disarm()
+                if self.state == "armed":   # nothing hit a pause point yet;
+                    pass                     # leave armed -- it will park soon
         return ok
+
+    def wait_paused(self, timeout: Optional[float] = None) -> bool:
+        """Block until a worker is actually parked (or timeout)."""
+        return self._paused_evt.wait(timeout)
 
     def resume(self) -> None:
         with self._lock:
@@ -179,6 +183,23 @@ class PauseEngine:
             return {"state": self.state,
                     "registered_threads": len(self._threads),
                     "paused_thread": self._paused_thread}
+
+    # ------------------------------------------------------------------ #
+    # Cooperative checkpoint (drop inside a loop for instant pause points)
+    # ------------------------------------------------------------------ #
+
+    def checkpoint(self) -> None:
+        """Near-free pause point. Call between expensive steps in a loop.
+
+        Fast path is a single Event check while running. If a pause was
+        armed, parks the calling frame here immediately (no waiting for the
+        next line event); if a stop was requested, raises StopExecution.
+        Use this when one iteration is a long native call that the
+        line-event pauser can't interrupt mid-flight.
+        """
+        if not self._stop_requested and self._resume_evt.is_set():
+            return                                  # hot path: keep running
+        self._maybe_park(sys._getframe(1))
 
     # ------------------------------------------------------------------ #
     # The actual park (both backends funnel here)
@@ -290,3 +311,15 @@ class PauseEngine:
 
 # A process-wide default engine (what the kernel and the Colab plugin share).
 default_engine = PauseEngine()
+
+
+def checkpoint() -> None:
+    """Module-level cooperative pause point bound to the default engine.
+
+    Drop ``from interactive_kernel import checkpoint`` then ``checkpoint()``
+    inside a loop for instant, near-zero-cost pause/stop points.
+    """
+    eng = default_engine
+    if not eng._stop_requested and eng._resume_evt.is_set():
+        return
+    eng._maybe_park(sys._getframe(1))
